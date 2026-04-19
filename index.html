@@ -71,7 +71,8 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 250px; height: auto;
+      width: clamp(90px, 28vw, 200px);
+      height: auto;
       border-radius: 18px;
       margin-bottom: 14px;
       position: relative;
@@ -79,9 +80,10 @@
     }
     .logo-mark img {
       width: 100%;
-      height: 100%;
-      object-fit: cover;
+      height: auto;
+      object-fit: contain;
       border-radius: 18px;
+      display: block;
     }
 
     header h1 {
@@ -995,16 +997,36 @@
     .format-doc::-webkit-scrollbar-thumb { background: rgba(168,85,247,0.3); border-radius: 3px; }
 
     /* ── RESPONSIVE ── */
+
+    /* Tablet (541px – 768px) */
+    @media (max-width: 768px) {
+      header { padding: 32px 16px 22px; }
+      .logo-mark { width: clamp(80px, 22vw, 160px); }
+    }
+
+    /* Large mobile / small tablet (481px – 540px) */
     @media (max-width: 540px) {
       .ai-btn-row { grid-template-columns: 1fr; }
+      .logo-mark { width: clamp(72px, 24vw, 130px); }
     }
+
+    /* Mobile (≤480px) */
     @media (max-width: 480px) {
-      .logo-mark { width: 58px; height: 58px; }
-      .logo-mark::after { font-size: 26px; }
+      header { padding: 24px 14px 18px; }
+      .logo-mark { width: clamp(64px, 26vw, 110px); }
       .mic-btn { width: 78px; height: 78px; font-size: 32px; }
       .action-row { grid-template-columns: 1fr 1fr; }
       .modal-box { padding: 22px 18px 20px; }
       .provider-tabs { gap: 5px; }
+      .format-action-btns { gap: 4px; }
+      .format-action-btns .btn-sm { padding: 4px 8px; font-size: 0.7rem; }
+    }
+
+    /* Very small phones (≤360px) */
+    @media (max-width: 360px) {
+      .logo-mark { width: clamp(56px, 28vw, 90px); }
+      .btn-polish, .btn-format { font-size: 0.9rem; padding: 12px 12px; }
+      .action-row { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
@@ -1258,7 +1280,7 @@
 <!-- FOOTER -->
 <footer>
   <div class="footer-logo">
-    <img src="lipi-sarathi-logo.svg" alt="Lipi Sarathi Logo" />
+    <img src="src/lipi-sarathi-logo.svg" alt="Lipi Sarathi Logo" />
     <span>लिपि सारथी</span>
   </div>
   <p class="footer-creator">
@@ -1309,6 +1331,9 @@
   // ── SPEECH RECOGNITION SETUP ──
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
+  // Detect mobile to apply workarounds
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
   if (!SpeechRecognition) {
     noSupport.style.display = 'block';
     micBtn.disabled = true;
@@ -1320,14 +1345,29 @@
   }
 
   function initRecognition() {
+    // Always create a FRESH instance — prevents mobile from replaying old results
+    if (recognition) {
+      try { recognition.onend = null; recognition.abort(); } catch(_) {}
+    }
     recognition = new SpeechRecognition();
     recognition.lang = langSelect.value;
     recognition.interimResults = true;
-    recognition.continuous = true;
+    // On mobile: continuous=false avoids the duplicate replay bug.
+    // We manually restart in onend for seamless experience.
+    recognition.continuous = !isMobile;
     recognition.maxAlternatives = 1;
+
+    // ── Per-session base: what was already confirmed before THIS session started ──
+    // This is the key fix: each new recognition instance starts fresh,
+    // so we snapshot finalTranscript here and only ADD to it within this session.
+    let sessionBase = finalTranscript;
+    let sessionFinals = ''; // finals collected only in THIS recognition session
 
     recognition.onstart = () => {
       isListening = true;
+      // Sync base in case user edited the textarea between sessions
+      sessionBase = finalTranscript;
+      sessionFinals = '';
       micBtn.classList.add('active');
       micBtn.innerHTML = '⏹️';
       micLabel.textContent = 'Tap to stop voice typing';
@@ -1339,41 +1379,57 @@
 
     recognition.onresult = (e) => {
       let interim = '';
+      // e.resultIndex tells us where NEW results start in this session's list.
+      // Because we create a new instance each restart, index always starts from 0
+      // for that session — so we iterate from e.resultIndex to avoid re-reading
+      // already-processed results within the same session.
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const t = e.results[i][0].transcript;
         if (e.results[i].isFinal) {
-          finalTranscript += t + ' ';
+          sessionFinals += t + ' ';
         } else {
           interim += t;
         }
       }
+      // Always reconstruct from base + this session's finals only
+      finalTranscript = sessionBase + sessionFinals;
       outputArea.value = finalTranscript;
       interimDisplay.textContent = interim ? '✦ ' + interim : '';
       updateCharCount();
-      // Auto-scroll
       outputArea.scrollTop = outputArea.scrollHeight;
     };
 
     recognition.onerror = (e) => {
       if (e.error === 'no-speech') {
+        // On mobile, no-speech fires frequently — just restart silently if still listening
+        if (isListening) return;
         setStatus('ready', 'No speech detected — try again.');
       } else if (e.error === 'not-allowed') {
         setStatus('error', '❌ Microphone access denied. Please allow mic in browser settings.');
         showToast('Microphone permission denied.');
+        stopListening();
       } else if (e.error === 'network') {
         setStatus('error', '❌ Network error — speech recognition needs internet.');
         showToast('Network error. Check your connection.');
+        stopListening();
+      } else if (e.error === 'aborted') {
+        // Aborted intentionally (our own stop/restart) — ignore
       } else {
         setStatus('error', 'Error: ' + e.error);
+        stopListening();
       }
-      stopListening();
     };
 
     recognition.onend = () => {
       if (isListening) {
-        // auto-restart for continuous experience
+        // Commit this session's finals into finalTranscript before creating new instance
+        finalTranscript = sessionBase + sessionFinals;
+        // Re-init creates a FRESH SpeechRecognition with a clean result list.
+        // This is the core mobile fix: new instance = no old results replayed.
+        initRecognition();
         try { recognition.start(); } catch(_) { stopListening(); }
       } else {
+        finalTranscript = sessionBase + sessionFinals;
         stopListening();
       }
     };
@@ -1398,12 +1454,12 @@
       isListening = false;
       try { recognition.stop(); } catch(_) {}
     } else {
+      // Sync finalTranscript with any manual edits before starting
       finalTranscript = outputArea.value;
+      // Always reinit to get a clean instance (especially important on mobile)
+      initRecognition();
       recognition.lang = langSelect.value;
-      try { recognition.start(); } catch(_) {
-        initRecognition();
-        recognition.start();
-      }
+      try { recognition.start(); } catch(err) { stopListening(); }
     }
   });
 
@@ -1411,7 +1467,10 @@
     if (isListening) {
       isListening = false;
       try { recognition.stop(); } catch(_) {}
+      finalTranscript = outputArea.value;
       initRecognition();
+      recognition.lang = langSelect.value;
+      try { recognition.start(); } catch(_) { stopListening(); }
     }
   });
 
